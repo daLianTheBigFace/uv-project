@@ -13,6 +13,38 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 
+WEATHER_CODE_MAP = {
+	0: "晴朗",
+	1: "大体晴",
+	2: "局部多云",
+	3: "阴",
+	45: "雾",
+	48: "雾凇",
+	51: "小毛毛雨",
+	53: "毛毛雨",
+	55: "强毛毛雨",
+	56: "冻毛毛雨",
+	57: "强冻毛毛雨",
+	61: "小雨",
+	63: "中雨",
+	65: "大雨",
+	66: "冻雨",
+	67: "强冻雨",
+	71: "小雪",
+	73: "中雪",
+	75: "大雪",
+	77: "米雪",
+	80: "阵雨",
+	81: "较强阵雨",
+	82: "强阵雨",
+	85: "阵雪",
+	86: "强阵雪",
+	95: "雷雨",
+	96: "雷雨伴小冰雹",
+	99: "强雷雨伴冰雹",
+}
+
+
 class WeatherInput(BaseModel):
 	city: str = Field(..., description="需要查询天气的城市名，例如: 上海")
 
@@ -23,34 +55,28 @@ def _fetch_json(url: str) -> dict[str, Any]:
 
 
 def _weather_code_to_text(code: int) -> str:
-	mapping = {
-		0: "晴朗",
-		1: "大体晴",
-		2: "局部多云",
-		3: "阴",
-		45: "雾",
-		48: "雾凇",
-		51: "小毛毛雨",
-		53: "毛毛雨",
-		55: "强毛毛雨",
-		61: "小雨",
-		63: "中雨",
-		65: "大雨",
-		71: "小雪",
-		73: "中雪",
-		75: "大雪",
-		80: "阵雨",
-		81: "较强阵雨",
-		82: "强阵雨",
-		95: "雷雨",
-	}
-	return mapping.get(code, f"未知天气代码({code})")
+	return WEATHER_CODE_MAP.get(code, f"未知天气代码({code})")
+
+
+def _weather_error(message: str, city: str) -> str:
+	return json.dumps(
+		{
+			"status": "error",
+			"city": city,
+			"message": message,
+		},
+		ensure_ascii=False,
+	)
 
 
 @tool("get_weather", args_schema=WeatherInput)
 def get_weather(city: str) -> str:
 	"""根据城市名称查询实时天气信息。"""
-	encoded_city = urllib.parse.quote(city.strip())
+	city = city.strip()
+	if not city:
+		return _weather_error("城市名不能为空", city)
+
+	encoded_city = urllib.parse.quote(city)
 	geo_url = (
 		"https://geocoding-api.open-meteo.com/v1/search?"
 		f"name={encoded_city}&count=1&language=zh&format=json"
@@ -58,7 +84,7 @@ def get_weather(city: str) -> str:
 	geo_data = _fetch_json(geo_url)
 	results = geo_data.get("results") or []
 	if not results:
-		return f"没有找到城市: {city}"
+		return _weather_error("没有找到匹配的城市", city)
 
 	location = results[0]
 	latitude = location["latitude"]
@@ -75,24 +101,32 @@ def get_weather(city: str) -> str:
 	weather_data = _fetch_json(weather_url)
 	current = weather_data.get("current") or {}
 	if not current:
-		return f"获取天气失败: {city_name}"
+		return _weather_error("未获取到实时天气数据", city_name)
 
-	weather_desc = _weather_code_to_text(int(current.get("weather_code", -1)))
-	return (
-		f"{city_name} {country} 当前天气: {weather_desc}; "
-		f"温度 {current.get('temperature_2m')}°C; "
-		f"体感温度 {current.get('apparent_temperature')}°C; "
-		f"湿度 {current.get('relative_humidity_2m')}%; "
-		f"风速 {current.get('wind_speed_10m')} km/h"
-	)
+	weather_code = int(current.get("weather_code", -1))
+	weather_desc = _weather_code_to_text(weather_code)
+	result = {
+		"status": "ok",
+		"city": city_name,
+		"country": country,
+		"weather_code": weather_code,
+		"weather_text": weather_desc,
+		"temperature_c": current.get("temperature_2m"),
+		"apparent_temperature_c": current.get("apparent_temperature"),
+		"humidity_pct": current.get("relative_humidity_2m"),
+		"wind_speed_kmh": current.get("wind_speed_10m"),
+	}
+	return json.dumps(result, ensure_ascii=False)
 
 
 def build_weather_agent(model_name: str = "deepseek-chat"):
 	system_prompt = (
 		"你是一个天气助手。"
 		"当用户询问天气时，必须优先调用 get_weather 工具后再回答。"
+		"get_weather 工具返回的是结构化天气事实或错误信息。"
+		"你需要基于这些事实自然组织语言，不要机械复读字段名，也不要编造工具里没有的数据。"
 		"回答保持简洁、中文输出。"
-        "可以回答的很有诗意，有时会让用户惊喜，但是也不要太夸张"
+		"可以略带一点灵动感，让用户读起来更自然，但不要太夸张。"
 	)
 	llm = ChatDeepSeek(model=model_name, temperature=0)
 	return create_agent(model=llm, tools=[get_weather], system_prompt=system_prompt)

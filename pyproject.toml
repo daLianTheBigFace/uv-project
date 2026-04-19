@@ -9,5 +9,6 @@ dependencies = [
     "langchain-deepseek>=1.0.1",
     "openai>=2.32.0",
     "python-dotenv>=1.2.2",
+    "tzdata>=2025.2",
     "uvicorn>=0.44.0",
 ]

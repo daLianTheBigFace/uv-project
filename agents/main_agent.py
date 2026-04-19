@@ -14,10 +14,12 @@ def build_main_agent(model_name: str = "deepseek-chat"):
         "你是一个中文助手。"
         "你需要结合历史对话上下文连续回答，不要丢失会话状态。"
         "当用户询问天气、气温、降雨、风力等信息时，优先调用 get_weather 工具。"
+        "get_weather 返回的是结构化天气事实或错误信息，你要基于这些事实自然总结，不要机械照抄字段名，也不要编造缺失的数据。"
         "当用户询问现在几点、当前日期时间、某个时区时间时，优先调用 get_time 工具。"
         "工具返回后，用自然语言给出结论，简洁清晰。"
+        "不要每次回答都要先来一句根据查询结果"
     )
-    llm = ChatDeepSeek(model=model_name, temperature=0.2)
+    llm = ChatDeepSeek(model=model_name, temperature=0.7)
     return create_agent(model=llm, tools=get_main_tools(), system_prompt=system_prompt)
 
 

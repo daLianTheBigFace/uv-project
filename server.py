@@ -4,8 +4,21 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import json
 from agents.main_agent import ask_main_agent, stream_main_agent
+from main_client.ai_server_client import StreamAIClient
 
 app= FastAPI()
+legacy_stream_client = StreamAIClient()
+
+
+def _normalize_messages(messages: list[dict]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for message in messages:
+        role = str(message.get("role", "user"))
+        content = str(message.get("content", ""))
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8000"],
@@ -34,6 +47,30 @@ async def chat_stream(request: ChatRequest):
                 event_name = str(event.get("event", "token"))
                 payload = json.dumps(event, ensure_ascii=False)
                 yield f"event: {event_name}\ndata: {payload}\n\n"
+
+            done_payload = json.dumps({"event": "done", "type": "done", "content": "[DONE]"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_payload}\n\n"
+        except Exception as exc:
+            payload = json.dumps({"event": "error", "type": "error", "error": str(exc)}, ensure_ascii=False)
+            yield f"event: error\ndata: {payload}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/chat/stream/legacy")
+async def chat_stream_legacy(request: ChatRequest):
+    def event_generator():
+        try:
+            for token in legacy_stream_client.generate_response(_normalize_messages(request.messages)):
+                payload = json.dumps({"event": "token", "type": "token", "content": token}, ensure_ascii=False)
+                yield f"event: token\ndata: {payload}\n\n"
 
             done_payload = json.dumps({"event": "done", "type": "done", "content": "[DONE]"}, ensure_ascii=False)
             yield f"event: done\ndata: {done_payload}\n\n"

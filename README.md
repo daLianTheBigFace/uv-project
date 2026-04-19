@@ -18,6 +18,7 @@ uv run uvicorn server:app --reload
 
 - `POST /chat`: non-stream response
 - `POST /chat/stream`: SSE stream response
+- `POST /chat/stream/legacy`: SSE stream response via old `StreamAIClient` (no tools)
 - Both endpoints route to one main agent that can auto-call `get_weather` based on intent.
 
 Example body:
