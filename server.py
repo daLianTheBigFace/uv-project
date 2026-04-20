@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import json
+from typing import Any, Literal
 from agents.main_agent import ask_main_agent, stream_main_agent
 from main_client.ai_server_client import StreamAIClient
 
@@ -10,13 +11,45 @@ app= FastAPI()
 legacy_stream_client = StreamAIClient()
 
 
-def _normalize_messages(messages: list[dict]) -> list[dict[str, str]]:
+def _content_to_text(content: str | list[Any]) -> str:
+    if isinstance(content, str):
+        return content
+
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, dict) and "text" in item:
+            parts.append(str(item["text"]))
+        else:
+            parts.append(str(item))
+    return "".join(parts)
+
+
+def _normalize_messages(messages: list["ChatMessage"]) -> list[dict[str, str]]:
     normalized: list[dict[str, str]] = []
     for message in messages:
-        role = str(message.get("role", "user"))
-        content = str(message.get("content", ""))
+        role = message.role
+        if role == "human":
+            role = "user"
+        elif role == "ai":
+            role = "assistant"
+        content = _content_to_text(message.content)
         normalized.append({"role": role, "content": content})
     return normalized
+
+
+def _serialize_messages(messages: list["ChatMessage"]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for message in messages:
+        item: dict[str, Any] = {
+            "role": message.role,
+            "content": message.content,
+        }
+        if message.tool_call_id:
+            item["tool_call_id"] = message.tool_call_id
+        if message.tool_calls is not None:
+            item["tool_calls"] = message.tool_calls
+        serialized.append(item)
+    return serialized
 
 
 app.add_middleware(
@@ -27,7 +60,14 @@ app.add_middleware(
 )
 
 class ChatRequest(BaseModel):
-    messages: list[dict]
+    messages: list["ChatMessage"]
+
+
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant", "tool", "human", "ai"] = "user"
+    content: str | list[Any] = ""
+    tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class WeatherRequest(BaseModel):
@@ -36,14 +76,14 @@ class WeatherRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    response = ask_main_agent(request.messages)
+    response = ask_main_agent(_serialize_messages(request.messages))
     return {"response": response}
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     def event_generator():
         try:
-            for event in stream_main_agent(request.messages):
+            for event in stream_main_agent(_serialize_messages(request.messages)):
                 event_name = str(event.get("event", "token"))
                 payload = json.dumps(event, ensure_ascii=False)
                 yield f"event: {event_name}\ndata: {payload}\n\n"

@@ -2,6 +2,7 @@ from typing import Any, Iterator, cast
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 
 from agents.tool_registry import get_main_tools
@@ -16,6 +17,10 @@ def build_main_agent(model_name: str = "deepseek-chat"):
         "当用户询问天气、气温、降雨、风力等信息时，优先调用 get_weather 工具。"
         "get_weather 返回的是结构化天气事实或错误信息，你要基于这些事实自然总结，不要机械照抄字段名，也不要编造缺失的数据。"
         "当用户询问现在几点、当前日期时间、某个时区时间时，优先调用 get_time 工具。"
+        "当用户输入一句台词并想知道出处、来源作品、角色时，优先调用 get_quote_source 工具。"
+        "get_quote_source 返回的是候选来源和匹配分数，你要用自然语言总结Top候选并提示结果仅供参考。"
+        "当用户询问动漫信息、番剧简介、评分、集数、年份或想找某部动漫时，优先调用 get_anime_info 工具。"
+        "get_anime_info 返回的是 Jikan 的结构化结果，你要提炼重点并用中文简洁回答。"
         "工具返回后，用自然语言给出结论，简洁清晰。"
         "不要每次回答都要先来一句根据查询结果"
     )
@@ -23,12 +28,37 @@ def build_main_agent(model_name: str = "deepseek-chat"):
     return create_agent(model=llm, tools=get_main_tools(), system_prompt=system_prompt)
 
 
-def _normalize_messages(messages: list[dict]) -> list[dict[str, str]]:
-    normalized: list[dict[str, str]] = []
+def _normalize_content(content: Any) -> str | list[Any]:
+    if isinstance(content, (str, list)):
+        return content
+    return str(content)
+
+
+def _to_langchain_message(message: dict[str, Any]) -> BaseMessage:
+    role = str(message.get("role", "user"))
+    content = _normalize_content(message.get("content", ""))
+
+    if role in {"user", "human"}:
+        return HumanMessage(content=content)
+    if role in {"assistant", "ai"}:
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            return AIMessage(content=content, tool_calls=cast(list[dict[str, Any]], tool_calls))
+        return AIMessage(content=content)
+    if role == "system":
+        return SystemMessage(content=content)
+    if role == "tool":
+        tool_call_id = str(message.get("tool_call_id", "tool_call"))
+        return ToolMessage(content=content, tool_call_id=tool_call_id)
+
+    return HumanMessage(content=content)
+
+
+def _normalize_messages(messages: list[dict]) -> list[BaseMessage]:
+    normalized: list[BaseMessage] = []
     for message in messages:
-        role = str(message.get("role", "user"))
-        content = str(message.get("content", ""))
-        normalized.append({"role": role, "content": content})
+        if isinstance(message, dict):
+            normalized.append(_to_langchain_message(cast(dict[str, Any], message)))
     return normalized
 
 
@@ -45,6 +75,12 @@ def _extract_text(agent_result: dict[str, Any]) -> str:
         for item in content:
             if isinstance(item, dict) and "text" in item:
                 parts.append(str(item["text"]))
+            elif hasattr(item, "get") and callable(getattr(item, "get")):
+                value = item.get("text")
+                if value is not None:
+                    parts.append(str(value))
+                else:
+                    parts.append(str(item))
             else:
                 parts.append(str(item))
         return "".join(parts)
@@ -78,6 +114,10 @@ def stream_main_agent(messages: list[dict], model_name: str = "deepseek-chat") -
                 status = "🔧 正在查询天气..."
             elif tool_name == "get_time":
                 status = "🕒 正在查询时间..."
+            elif tool_name == "get_quote_source":
+                status = "🎬 正在分析台词来源..."
+            elif tool_name == "get_anime_info":
+                status = "📺 正在检索动漫信息..."
             yield {"event": "status", "type": "status", "content": status}
             continue
 
