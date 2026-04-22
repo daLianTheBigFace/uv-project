@@ -1,3 +1,4 @@
+import argparse
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -52,4 +53,11 @@ def get_time(timezone: str = "Asia/Shanghai") -> str:
 
     now = datetime.now(tz)
     return now.strftime("当前时间(%Z): %Y-%m-%d %H:%M:%S")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="时区时间查询工具")
+    parser.add_argument("--timezone", default="Asia/Shanghai", help="例如: Asia/Shanghai")
+    args = parser.parse_args()
+    print(get_time.invoke({"timezone": args.timezone}))
 

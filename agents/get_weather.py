@@ -1,5 +1,7 @@
 import argparse
 import json
+import socket
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Iterator, cast
@@ -81,14 +83,21 @@ def get_weather(city: str) -> str:
 		"https://geocoding-api.open-meteo.com/v1/search?"
 		f"name={encoded_city}&count=1&language=zh&format=json"
 	)
-	geo_data = _fetch_json(geo_url)
+	try:
+		geo_data = _fetch_json(geo_url)
+	except urllib.error.HTTPError as exc:
+		return _weather_error(f"地理编码查询失败: HTTP {exc.code}", city)
+	except (urllib.error.URLError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+		return _weather_error(f"地理编码查询失败: {exc}", city)
 	results = geo_data.get("results") or []
 	if not results:
 		return _weather_error("没有找到匹配的城市", city)
 
 	location = results[0]
-	latitude = location["latitude"]
-	longitude = location["longitude"]
+	latitude = location.get("latitude")
+	longitude = location.get("longitude")
+	if latitude is None or longitude is None:
+		return _weather_error("地理编码结果缺少经纬度", city)
 	city_name = location.get("name", city)
 	country = location.get("country", "")
 
@@ -98,7 +107,12 @@ def get_weather(city: str) -> str:
 		"&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m"
 		"&timezone=auto"
 	)
-	weather_data = _fetch_json(weather_url)
+	try:
+		weather_data = _fetch_json(weather_url)
+	except urllib.error.HTTPError as exc:
+		return _weather_error(f"天气查询失败: HTTP {exc.code}", city_name)
+	except (urllib.error.URLError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+		return _weather_error(f"天气查询失败: {exc}", city_name)
 	current = weather_data.get("current") or {}
 	if not current:
 		return _weather_error("未获取到实时天气数据", city_name)

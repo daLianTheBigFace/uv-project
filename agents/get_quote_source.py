@@ -18,16 +18,26 @@ class QuoteSourceInput(BaseModel):
     line: str = Field(..., description="需要分析来源的台词，例如: 我命由我不由天")
 
 
-OPEN_SUBTITLES_BASE_URL = os.getenv("OPEN_SUBTITLES_BASE_URL", "https://api.opensubtitles.com/api/v1")
 load_dotenv()
+OPEN_SUBTITLES_BASE_URL = os.getenv("OPEN_SUBTITLES_BASE_URL", "https://api.opensubtitles.com/api/v1")
 
 
 _PUNT_PATTERN = re.compile(r"[\s\W_]+", flags=re.UNICODE)
+_QUERY_PREFIX_PATTERN = re.compile(r"^(帮我|请|麻烦)?(查一下|查查|查询一下|看看)?(这句)?(台词)?(出处|来源)?[:：]?", flags=re.UNICODE)
+_QUERY_SUFFIX_PATTERN = re.compile(r"(的)?(出处|来源)(是)?$", flags=re.UNICODE)
 
 
 def _normalize_text(text: str) -> str:
     compact = _PUNT_PATTERN.sub("", text).lower()
     return compact
+
+
+def _clean_query(text: str) -> str:
+    cleaned = text.strip().strip("\"'“”‘’")
+    cleaned = _QUERY_PREFIX_PATTERN.sub("", cleaned).strip()
+    cleaned = cleaned.rstrip("？?。.!！").strip()
+    cleaned = _QUERY_SUFFIX_PATTERN.sub("", cleaned).strip()
+    return cleaned
 
 
 def _fetch_json(
@@ -156,7 +166,7 @@ def _score_candidate(query_norm: str, alias_norm: str) -> float:
 @tool("get_quote_source", args_schema=QuoteSourceInput)
 def get_quote_source(line: str) -> str:
     """根据台词内容推测可能的来源作品。"""
-    query = line.strip()
+    query = _clean_query(line)
     if not query:
         return _quote_error("台词不能为空", line)
 

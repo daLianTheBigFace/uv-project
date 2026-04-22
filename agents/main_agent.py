@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import Any, Iterator, cast
 
 from dotenv import load_dotenv
@@ -10,22 +11,37 @@ from agents.tool_registry import get_main_tools
 load_dotenv()
 
 
-def build_main_agent(model_name: str = "deepseek-chat"):
-    system_prompt = (
-        "你是一个中文助手。"
-        "你需要结合历史对话上下文连续回答，不要丢失会话状态。"
-        "当用户询问天气、气温、降雨、风力等信息时，优先调用 get_weather 工具。"
-        "get_weather 返回的是结构化天气事实或错误信息，你要基于这些事实自然总结，不要机械照抄字段名，也不要编造缺失的数据。"
-        "当用户询问现在几点、当前日期时间、某个时区时间时，优先调用 get_time 工具。"
-        "当用户输入一句台词并想知道出处、来源作品、角色时，优先调用 get_quote_source 工具。"
-        "get_quote_source 返回的是候选来源和匹配分数，你要用自然语言总结Top候选并提示结果仅供参考。"
-        "当用户询问动漫信息、番剧简介、评分、集数、年份或想找某部动漫时，优先调用 get_anime_info 工具。"
-        "get_anime_info 返回的是 Jikan 的结构化结果，你要提炼重点并用中文简洁回答。"
-        "工具返回后，用自然语言给出结论，简洁清晰。"
-        "不要每次回答都要先来一句根据查询结果"
-    )
+SYSTEM_PROMPT = (
+    "你是一个中文助手。"
+    "你需要结合历史对话上下文连续回答，不要丢失会话状态。"
+    "当用户询问天气、气温、降雨、风力等信息时，优先调用 get_weather 工具。"
+    "get_weather 返回的是结构化天气事实或错误信息，你要基于这些事实自然总结，不要机械照抄字段名，也不要编造缺失的数据。"
+    "当用户询问现在几点、当前日期时间、某个时区时间时，优先调用 get_time 工具。"
+    "当用户输入一句台词并想知道出处、来源作品、角色时，优先调用 get_quote_source 工具。"
+    "get_quote_source 返回的是候选来源和匹配分数，你要用自然语言总结Top候选并提示结果仅供参考。"
+    "当用户询问动漫信息、番剧简介、评分、集数、年份或想找某部动漫时，优先调用 get_anime_info 工具。"
+    "get_anime_info 返回的是 Jikan 的结构化结果，你要提炼重点并用中文简洁回答。"
+    "工具返回后，用自然语言给出结论，简洁清晰。"
+    "不要每次回答都要先来一句根据查询结果"
+)
+
+
+TOOL_STATUS_TEXT = {
+    "get_weather": "🔧 正在查询天气...",
+    "get_time": "🕒 正在查询时间...",
+    "get_quote_source": "🎬 正在分析台词来源...",
+    "get_anime_info": "📺 正在检索动漫信息...",
+}
+
+
+@lru_cache(maxsize=4)
+def _build_cached_main_agent(model_name: str):
     llm = ChatDeepSeek(model=model_name, temperature=0.7)
-    return create_agent(model=llm, tools=get_main_tools(), system_prompt=system_prompt)
+    return create_agent(model=llm, tools=get_main_tools(), system_prompt=SYSTEM_PROMPT)
+
+
+def build_main_agent(model_name: str = "deepseek-chat"):
+    return _build_cached_main_agent(model_name)
 
 
 def _normalize_content(content: Any) -> str | list[Any]:
@@ -97,7 +113,7 @@ def ask_main_agent(messages: list[dict], model_name: str = "deepseek-chat") -> s
 def stream_main_agent(messages: list[dict], model_name: str = "deepseek-chat") -> Iterator[dict[str, str]]:
     agent = build_main_agent(model_name=model_name)
     payload = cast(Any, {"messages": _normalize_messages(messages)})
-    tool_status_sent = False
+    last_tool_name = ""
     for event in agent.stream(payload, stream_mode="messages"):
         if not isinstance(event, tuple) or not event:
             continue
@@ -106,19 +122,12 @@ def stream_main_agent(messages: list[dict], model_name: str = "deepseek-chat") -
         meta = event[1] if len(event) > 1 and isinstance(event[1], dict) else {}
         node = str(meta.get("langgraph_node", ""))
 
-        if node == "tools" and not tool_status_sent:
-            tool_status_sent = True
+        if node == "tools":
             tool_name = str(getattr(message_chunk, "name", "") or "")
-            status = "🔧 正在调用工具查询..."
-            if tool_name == "get_weather":
-                status = "🔧 正在查询天气..."
-            elif tool_name == "get_time":
-                status = "🕒 正在查询时间..."
-            elif tool_name == "get_quote_source":
-                status = "🎬 正在分析台词来源..."
-            elif tool_name == "get_anime_info":
-                status = "📺 正在检索动漫信息..."
-            yield {"event": "status", "type": "status", "content": status}
+            if tool_name and tool_name != last_tool_name:
+                last_tool_name = tool_name
+                status = TOOL_STATUS_TEXT.get(tool_name, "🔧 正在调用工具查询...")
+                yield {"event": "status", "type": "status", "content": status}
             continue
 
         if node != "model":

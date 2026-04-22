@@ -6,9 +6,9 @@ A FastAPI project with a LangChain main agent powered by DeepSeek and Open-Meteo
 
 - Python 3.13+
 - `DEEPSEEK_API_KEY` in `.env`
-- `OPENSUBTITLES_API_KEY` in `.env` (for quote source tool)
-- Optional for better quota/auth: `OPENSUBTITLES_USERNAME`, `OPENSUBTITLES_PASSWORD`
-- Optional: `OPENSUBTITLES_USER_AGENT` (default: `uv-project-quote-source/0.1`)
+- `OPEN_SUBTITLES_API_KEY` in `.env` (for quote source tool)
+- Optional for better quota/auth: `OPEN_SUBTITLES_USERNAME`, `OPEN_SUBTITLES_PASSWORD`
+- Optional: `OPEN_SUBTITLES_USER_AGENT` (default: `uv-project-quote-source/0.1`)
 - Jikan API is used for anime lookup (no API key required)
 
 ## Run API Server
@@ -54,7 +54,7 @@ uv run python agents/get_anime_info.py "进击的巨人"
 ## Notes
 
 - Weather data source: Open-Meteo (no API key required)
-- The agent is implemented in `agents/get_weather.py`
+- The main orchestrator agent is implemented in `agents/main_agent.py`
 - Quote source skeleton tool: `agents/get_quote_source.py`
 - Quote source data path: OpenSubtitles API (`/api/v1/subtitles`)
 - Anime tool: `agents/get_anime_info.py` (Jikan `/v4/anime`)
