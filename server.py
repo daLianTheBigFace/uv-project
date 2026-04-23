@@ -4,12 +4,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import json
 import uuid
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 from agents.main_agent import ask_main_agent, stream_main_agent
 from main_client.ai_server_client import StreamAIClient
+from main_client.ai_vision_client import AIVisionClient
 
 app= FastAPI()
 legacy_stream_client = StreamAIClient()
+vision_client = AIVisionClient()
 
 
 def _content_to_text(content: str | list[Any]) -> str:
@@ -66,6 +68,14 @@ def _resolve_conversation_id(conversation_id: str | None) -> str:
     return _new_conversation_id()
 
 
+def _has_images(messages: list[ChatMessage]) -> bool:
+    """检测消息列表中是否包含图片内容（content 为 list 即为多模态消息）"""
+    for msg in messages:
+        if isinstance(msg.content, list):
+            return True
+    return False
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8000"],
@@ -100,6 +110,19 @@ async def chat(request: ChatRequest):
 async def chat_stream(request: ChatRequest):
     conversation_id = _resolve_conversation_id(request.conversation_id)
 
+    if _has_images(request.messages):
+        # 含图片 → 走 vision 直调路径
+        return StreamingResponse(
+            _stream_vision(request.messages, conversation_id),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Conversation-Id": conversation_id,
+            },
+        )
+
+    # 纯文本 → 走原 LangChain Agent 路径
     def event_generator():
         try:
             meta_payload = json.dumps(
@@ -108,15 +131,23 @@ async def chat_stream(request: ChatRequest):
             )
             yield f"event: meta\ndata: {meta_payload}\n\n"
 
-            for event in stream_main_agent(_serialize_messages(request.messages), conversation_id=conversation_id):
+            for event in stream_main_agent(
+                _serialize_messages(request.messages), conversation_id=conversation_id
+            ):
                 event_name = str(event.get("event", "token"))
                 payload = json.dumps(event, ensure_ascii=False)
                 yield f"event: {event_name}\ndata: {payload}\n\n"
 
-            done_payload = json.dumps({"event": "done", "type": "done", "content": "[DONE]"}, ensure_ascii=False)
+            done_payload = json.dumps(
+                {"event": "done", "type": "done", "content": "[DONE]"},
+                ensure_ascii=False,
+            )
             yield f"event: done\ndata: {done_payload}\n\n"
         except Exception as exc:
-            payload = json.dumps({"event": "error", "type": "error", "error": str(exc)}, ensure_ascii=False)
+            payload = json.dumps(
+                {"event": "error", "type": "error", "error": str(exc)},
+                ensure_ascii=False,
+            )
             yield f"event: error\ndata: {payload}\n\n"
 
     return StreamingResponse(
@@ -152,6 +183,30 @@ async def chat_stream_legacy(request: ChatRequest):
             "Connection": "keep-alive",
         },
     )
+
+
+def _stream_vision(
+    messages: list[ChatMessage],
+    conversation_id: str,
+) -> Iterator[str]:
+    """处理多模态（图片+文字）消息，直调 DeepSeek Vision API"""
+    serialized = _serialize_messages(messages)
+    try:
+        for event in vision_client.stream_chat(serialized):
+            payload = json.dumps(event, ensure_ascii=False)
+            yield f"event: token\ndata: {payload}\n\n"
+
+        done_payload = json.dumps(
+            {"event": "done", "type": "done", "content": "[DONE]"},
+            ensure_ascii=False,
+        )
+        yield f"event: done\ndata: {done_payload}\n\n"
+    except Exception as exc:
+        payload = json.dumps(
+            {"event": "error", "type": "error", "error": str(exc)},
+            ensure_ascii=False,
+        )
+        yield f"event: error\ndata: {payload}\n\n"
 
 
 @app.post("/weather/chat")
