@@ -192,9 +192,16 @@ def _stream_vision(
     """处理多模态（图片+文字）消息，直调 DeepSeek Vision API"""
     serialized = _serialize_messages(messages)
     try:
+        meta_payload = json.dumps(
+            {"event": "meta", "type": "meta", "conversation_id": conversation_id},
+            ensure_ascii=False,
+        )
+        yield f"event: meta\ndata: {meta_payload}\n\n"
+
         for event in vision_client.stream_chat(serialized):
+            event_name = str(event.get("event", "token"))
             payload = json.dumps(event, ensure_ascii=False)
-            yield f"event: token\ndata: {payload}\n\n"
+            yield f"event: {event_name}\ndata: {payload}\n\n"
 
         done_payload = json.dumps(
             {"event": "done", "type": "done", "content": "[DONE]"},
