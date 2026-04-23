@@ -68,12 +68,57 @@ def _resolve_conversation_id(conversation_id: str | None) -> str:
     return _new_conversation_id()
 
 
-def _has_images(messages: list[ChatMessage]) -> bool:
-    """检测消息列表中是否包含图片内容（content 为 list 即为多模态消息）"""
-    for msg in messages:
-        if isinstance(msg.content, list):
+def _content_has_image(content: str | list[Any]) -> bool:
+    if not isinstance(content, list):
+        return False
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        part_type = str(item.get("type", "")).strip().lower()
+        if part_type in {"image_url", "input_image", "image"}:
+            return True
+        if "image_url" in item:
             return True
     return False
+
+
+def _latest_user_has_images(messages: list["ChatMessage"]) -> bool:
+    """仅根据本轮最新用户消息判断是否走视觉链路。"""
+    for msg in reversed(messages):
+        if msg.role in {"user", "human"}:
+            return _content_has_image(msg.content)
+    return False
+
+
+def _build_vision_error_fallback(
+    messages: list["ChatMessage"],
+    exc: Exception,
+    conversation_id: str,
+) -> str:
+    """视觉链路失败时，快速返回可读解释，避免再次调用模型造成阻塞。"""
+    last_user_text = ""
+    for msg in reversed(messages):
+        if msg.role in {"user", "human"}:
+            last_user_text = _content_to_text(msg.content)
+            break
+
+    error_text = str(exc)
+    if "unknown variant `image_url`" in error_text or "invalid_request_error" in error_text:
+        reason = "当前视觉接口不接受你这次上传的图片消息格式。"
+    elif "timeout" in error_text.lower():
+        reason = "图片识别请求超时了。"
+    else:
+        reason = "图片识别请求处理失败。"
+
+    user_hint = f"你刚才的请求是：{last_user_text}。\n" if last_user_text else ""
+    return (
+        f"抱歉，{reason}\n"
+        f"{user_hint}"
+        "你可以这样继续：\n"
+        "1) 直接用文字描述图片内容，我先按文字帮你分析；\n"
+        "2) 重新上传图片（尽量使用常见格式并减少体积）再试；\n"
+        "3) 如果你愿意，我可以先根据你的问题给出不依赖图片的建议。"
+    )
 
 
 app.add_middleware(
@@ -110,7 +155,7 @@ async def chat(request: ChatRequest):
 async def chat_stream(request: ChatRequest):
     conversation_id = _resolve_conversation_id(request.conversation_id)
 
-    if _has_images(request.messages):
+    if _latest_user_has_images(request.messages):
         # 含图片 → 走 vision 直调路径
         return StreamingResponse(
             _stream_vision(request.messages, conversation_id),
@@ -186,7 +231,7 @@ async def chat_stream_legacy(request: ChatRequest):
 
 
 def _stream_vision(
-    messages: list[ChatMessage],
+    messages: list["ChatMessage"],
     conversation_id: str,
 ) -> Iterator[str]:
     """处理多模态（图片+文字）消息，直调 DeepSeek Vision API"""
@@ -209,11 +254,18 @@ def _stream_vision(
         )
         yield f"event: done\ndata: {done_payload}\n\n"
     except Exception as exc:
-        payload = json.dumps(
-            {"event": "error", "type": "error", "error": str(exc)},
+        fallback_text = _build_vision_error_fallback(messages, exc, conversation_id)
+        token_payload = json.dumps(
+            {"event": "token", "type": "token", "content": fallback_text},
             ensure_ascii=False,
         )
-        yield f"event: error\ndata: {payload}\n\n"
+        yield f"event: token\ndata: {token_payload}\n\n"
+
+        done_payload = json.dumps(
+            {"event": "done", "type": "done", "content": "[DONE]"},
+            ensure_ascii=False,
+        )
+        yield f"event: done\ndata: {done_payload}\n\n"
 
 
 @app.post("/weather/chat")
