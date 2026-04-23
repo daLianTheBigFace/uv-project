@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Iterator, cast
 
 from dotenv import load_dotenv
@@ -6,24 +7,57 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 
+from agents.trace_logger import finish_run, log_event, start_run
 from agents.tool_registry import get_main_tools
 
 load_dotenv()
 
 
-SYSTEM_PROMPT = (
-    "你是一个中文助手。"
-    "你需要结合历史对话上下文连续回答，不要丢失会话状态。"
-    "当用户询问天气、气温、降雨、风力等信息时，优先调用 get_weather 工具。"
-    "get_weather 返回的是结构化天气事实或错误信息，你要基于这些事实自然总结，不要机械照抄字段名，也不要编造缺失的数据。"
-    "当用户询问现在几点、当前日期时间、某个时区时间时，优先调用 get_time 工具。"
-    "当用户输入一句台词并想知道出处、来源作品、角色时，优先调用 get_quote_source 工具。"
-    "get_quote_source 返回的是候选来源和匹配分数，你要用自然语言总结Top候选并提示结果仅供参考。"
-    "当用户询问动漫信息、番剧简介、评分、集数、年份或想找某部动漫时，优先调用 get_anime_info 工具。"
-    "get_anime_info 返回的是 Jikan 的结构化结果，你要提炼重点并用中文简洁回答。"
-    "工具返回后，用自然语言给出结论，简洁清晰。"
-    "不要每次回答都要先来一句根据查询结果"
-)
+_PROMPT_EXAMPLES_PATH = Path(__file__).resolve().parent / "prompts" / "main_agent_few_shot.txt"
+
+
+BASE_SYSTEM_PROMPT = """
+你是一个中文助手，始终以简洁、准确、负责任的中文回答用户。
+
+总体规则：
+- 优先使用可用工具获取事实性信息；只有在明确没有可用工具或需要澄清时，才直接用常识回答。
+- 任何基于工具返回的数据的结论，必须以工具返回内容为依据；不得编造工具没有提供的信息。
+- 当工具返回不确定结果（如 weak_match / no_match / error），请说明不确定性并给出可行的下一步建议（如补充上下文或改用其他关键词）。
+- 回答要简洁、直接，必要时给出 1-2 句补充说明或建议。始终以用户可操作的信息为主。
+
+工具使用规范：
+- get_weather(city): 查询天气相关问题（天气、气温、降雨、风力等）。必须先调用该工具并以其结构化结果为事实基础组织回答。
+- get_time(...): 查询当前时间/时区相关问题。必须调用该工具获取精确时间。
+- get_quote_source(line[, work_hint, language]): 当用户提供台词或询问出处时使用。工具返回候选作品、匹配分数和来源链接。将 Top 候选以自然语言列出并标注置信度与免责声明（“仅供参考”）。
+- get_anime_info(query): 查询动漫元信息（简介、评分、集数、年份等）。以工具的结构化字段为依据提炼要点。
+
+多工具与复杂任务：
+- 你可以决定连续调用多个工具以完成复杂任务（例如先用 web_search 获取候选，再调用 get_quote_source 再验证），但每次调用后都要基于工具输出决定下一步。
+- 当需要澄清用户意图（例如台词不完整、地点/时间歧义）时，先提问并等待用户确认，而不是盲目调用工具。
+
+输出格式与约束：
+- 回答必须为中文。
+- 对于事实性结论，优先给简洁结论；若有证据来源，附上简短来源说明（例如来源于 OpenSubtitles / Jikan / 网页）。
+- 遇到错误、缺少配置信息（如 API Key）或工具异常时，明确返回友好的错误说明并提示用户可能的解决方法。
+- 对于泛建议类问题（如旅游规划、日常建议）即使没有专用工具，也应先给出通用可执行建议，再明确哪些部分可以通过现有工具补充（例如天气）。
+- 不要直接以“没有相关工具所以无法提供建议”作为主要回复。
+"""
+
+
+@lru_cache(maxsize=1)
+def _load_few_shot_examples() -> str:
+    try:
+        text = _PROMPT_EXAMPLES_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return text
+
+
+def _build_system_prompt() -> str:
+    examples = _load_few_shot_examples()
+    if not examples:
+        return BASE_SYSTEM_PROMPT.strip()
+    return f"{BASE_SYSTEM_PROMPT.strip()}\n\n{examples}"
 
 
 TOOL_STATUS_TEXT = {
@@ -37,7 +71,7 @@ TOOL_STATUS_TEXT = {
 @lru_cache(maxsize=4)
 def _build_cached_main_agent(model_name: str):
     llm = ChatDeepSeek(model=model_name, temperature=0.7)
-    return create_agent(model=llm, tools=get_main_tools(), system_prompt=SYSTEM_PROMPT)
+    return create_agent(model=llm, tools=get_main_tools(), system_prompt=_build_system_prompt())
 
 
 def build_main_agent(model_name: str = "deepseek-chat"):
@@ -103,40 +137,109 @@ def _extract_text(agent_result: dict[str, Any]) -> str:
     return str(content)
 
 
-def ask_main_agent(messages: list[dict], model_name: str = "deepseek-chat") -> str:
+def _log_tool_events_from_messages(run_id: str, messages: list[Any]) -> int:
+    seq = 0
+    for message in messages:
+        tool_calls = getattr(message, "tool_calls", None)
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                seq += 1
+                tool_name = str(call.get("name", "") or "")
+                log_event(run_id, seq, "tool_call", call, tool_name=tool_name)
+
+        if isinstance(message, ToolMessage):
+            seq += 1
+            payload = {
+                "tool_call_id": getattr(message, "tool_call_id", ""),
+                "content": getattr(message, "content", ""),
+                "name": getattr(message, "name", ""),
+            }
+            tool_name = str(getattr(message, "name", "") or "")
+            log_event(run_id, seq, "tool_result", payload, tool_name=tool_name)
+    return seq
+
+
+def ask_main_agent(
+    messages: list[dict],
+    model_name: str = "deepseek-chat",
+    conversation_id: str | None = None,
+) -> str:
     agent = build_main_agent(model_name=model_name)
     payload = cast(Any, {"messages": _normalize_messages(messages)})
-    result = agent.invoke(payload)
-    return _extract_text(result)
+    run_id = start_run(
+        mode="ask",
+        model_name=model_name,
+        input_messages=messages,
+        conversation_id=conversation_id,
+    )
+    try:
+        result = agent.invoke(payload)
+        result_messages = result.get("messages") or []
+        _log_tool_events_from_messages(run_id, result_messages)
+        text = _extract_text(result)
+        finish_run(run_id, final_output=text)
+        return text
+    except Exception as exc:
+        finish_run(run_id, error=str(exc))
+        raise
 
 
-def stream_main_agent(messages: list[dict], model_name: str = "deepseek-chat") -> Iterator[dict[str, str]]:
+def stream_main_agent(
+    messages: list[dict],
+    model_name: str = "deepseek-chat",
+    conversation_id: str | None = None,
+) -> Iterator[dict[str, str]]:
     agent = build_main_agent(model_name=model_name)
     payload = cast(Any, {"messages": _normalize_messages(messages)})
     last_tool_name = ""
+    seq = 0
+    output_parts: list[str] = []
+    run_id = start_run(
+        mode="stream",
+        model_name=model_name,
+        input_messages=messages,
+        conversation_id=conversation_id,
+    )
     for event in agent.stream(payload, stream_mode="messages"):
-        if not isinstance(event, tuple) or not event:
-            continue
+        try:
+            if not isinstance(event, tuple) or not event:
+                continue
 
-        message_chunk = event[0]
-        meta = event[1] if len(event) > 1 and isinstance(event[1], dict) else {}
-        node = str(meta.get("langgraph_node", ""))
+            message_chunk = event[0]
+            meta = event[1] if len(event) > 1 and isinstance(event[1], dict) else {}
+            node = str(meta.get("langgraph_node", ""))
 
-        if node == "tools":
-            tool_name = str(getattr(message_chunk, "name", "") or "")
-            if tool_name and tool_name != last_tool_name:
-                last_tool_name = tool_name
-                status = TOOL_STATUS_TEXT.get(tool_name, "🔧 正在调用工具查询...")
-                yield {"event": "status", "type": "status", "content": status}
-            continue
+            if node == "tools":
+                tool_name = str(getattr(message_chunk, "name", "") or "")
+                if tool_name and tool_name != last_tool_name:
+                    last_tool_name = tool_name
+                    seq += 1
+                    log_event(
+                        run_id,
+                        seq,
+                        "tool_call",
+                        {"status": "started", "node": node},
+                        tool_name=tool_name,
+                    )
+                    status = TOOL_STATUS_TEXT.get(tool_name, "🔧 正在调用工具查询...")
+                    yield {"event": "status", "type": "status", "content": status}
+                continue
 
-        if node != "model":
-            continue
+            if node != "model":
+                continue
 
-        if getattr(message_chunk, "tool_call_chunks", None):
-            continue
+            if getattr(message_chunk, "tool_call_chunks", None):
+                continue
 
-        content = getattr(message_chunk, "content", "")
-        if isinstance(content, str) and content:
-            yield {"event": "token", "type": "token", "content": content}
+            content = getattr(message_chunk, "content", "")
+            if isinstance(content, str) and content:
+                output_parts.append(content)
+                yield {"event": "token", "type": "token", "content": content}
+        except Exception as exc:
+            finish_run(run_id, final_output="".join(output_parts) or None, error=str(exc))
+            raise
+
+    finish_run(run_id, final_output="".join(output_parts))
 

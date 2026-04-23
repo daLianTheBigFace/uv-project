@@ -29,3 +29,6 @@ dist/
 build/
 *.egg-info/
 
+# Local trace database
+data/*.sqlite3
+

@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import json
+import uuid
 from typing import Any, Literal
 from agents.main_agent import ask_main_agent, stream_main_agent
 from main_client.ai_server_client import StreamAIClient
@@ -52,6 +53,19 @@ def _serialize_messages(messages: list["ChatMessage"]) -> list[dict[str, Any]]:
     return serialized
 
 
+def _new_conversation_id() -> str:
+    generator = getattr(uuid, "uuid7", None)
+    if callable(generator):
+        return str(generator()).replace("-", "")
+    return uuid.uuid4().hex
+
+
+def _resolve_conversation_id(conversation_id: str | None) -> str:
+    if isinstance(conversation_id, str) and conversation_id.strip():
+        return conversation_id.strip()
+    return _new_conversation_id()
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8000"],
@@ -60,6 +74,7 @@ app.add_middleware(
 )
 
 class ChatRequest(BaseModel):
+    conversation_id: str | None = None
     messages: list["ChatMessage"]
 
 
@@ -71,19 +86,29 @@ class ChatMessage(BaseModel):
 
 
 class WeatherRequest(BaseModel):
+    conversation_id: str | None = None
     question: str
 
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    response = ask_main_agent(_serialize_messages(request.messages))
-    return {"response": response}
+    conversation_id = _resolve_conversation_id(request.conversation_id)
+    response = ask_main_agent(_serialize_messages(request.messages), conversation_id=conversation_id)
+    return {"conversation_id": conversation_id, "response": response}
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
+    conversation_id = _resolve_conversation_id(request.conversation_id)
+
     def event_generator():
         try:
-            for event in stream_main_agent(_serialize_messages(request.messages)):
+            meta_payload = json.dumps(
+                {"event": "meta", "type": "meta", "conversation_id": conversation_id},
+                ensure_ascii=False,
+            )
+            yield f"event: meta\ndata: {meta_payload}\n\n"
+
+            for event in stream_main_agent(_serialize_messages(request.messages), conversation_id=conversation_id):
                 event_name = str(event.get("event", "token"))
                 payload = json.dumps(event, ensure_ascii=False)
                 yield f"event: {event_name}\ndata: {payload}\n\n"
@@ -100,6 +125,7 @@ async def chat_stream(request: ChatRequest):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Conversation-Id": conversation_id,
         },
     )
 
@@ -130,6 +156,10 @@ async def chat_stream_legacy(request: ChatRequest):
 
 @app.post("/weather/chat")
 async def weather_chat(request: WeatherRequest):
-    response = ask_main_agent([{"role": "user", "content": request.question}])
-    return {"response": response}
+    conversation_id = _resolve_conversation_id(request.conversation_id)
+    response = ask_main_agent(
+        [{"role": "user", "content": request.question}],
+        conversation_id=conversation_id,
+    )
+    return {"conversation_id": conversation_id, "response": response}
 

@@ -29,6 +29,7 @@ Example body:
 
 ```json
 {
+  "conversation_id": "optional-client-provided-id",
   "messages": [
     {"role": "user", "content": "我们周末出门"},
     {"role": "assistant", "content": "好呀，想去哪里？"},
@@ -36,6 +37,9 @@ Example body:
   ]
 }
 ```
+
+- If `conversation_id` is omitted, server generates one and returns it in response JSON.
+- For `/chat/stream`, the ID is returned via SSE `meta` event and `X-Conversation-Id` header.
 
 ## Weather Endpoint (optional)
 
@@ -55,6 +59,8 @@ uv run python agents/get_anime_info.py "进击的巨人"
 
 - Weather data source: Open-Meteo (no API key required)
 - The main orchestrator agent is implemented in `agents/main_agent.py`
+- Main-agent few-shot examples are externalized in `agents/prompts/main_agent_few_shot.txt`
+- Main-agent traces are stored in SQLite at `data/agent_traces.sqlite3` (override via `AGENT_TRACE_DB_PATH`)
 - Quote source skeleton tool: `agents/get_quote_source.py`
 - Quote source data path: OpenSubtitles API (`/api/v1/subtitles`)
 - Anime tool: `agents/get_anime_info.py` (Jikan `/v4/anime`)
