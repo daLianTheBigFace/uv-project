@@ -6,6 +6,10 @@ A FastAPI project with a LangChain main agent powered by DeepSeek and Open-Meteo
 
 - Python 3.13+
 - `DEEPSEEK_API_KEY` in `.env`
+- Optional model override: `DEEPSEEK_CHAT_MODEL` (default: `deepseek-v4-flash`)
+- Optional legacy model override (compatible): `DEEPSEEK_MODEL`
+- Optional vision model override: `DEEPSEEK_VISION_MODEL`
+- Optional thinking-mode toggle: `DEEPSEEK_THINKING_ENABLED` (`false` by default)
 - `OPEN_SUBTITLES_API_KEY` in `.env` (for quote source tool)
 - Optional for better quota/auth: `OPEN_SUBTITLES_USERNAME`, `OPEN_SUBTITLES_PASSWORD`
 - Optional: `OPEN_SUBTITLES_USER_AGENT` (default: `uv-project-quote-source/0.1`)
@@ -40,6 +44,8 @@ Example body:
 
 - If `conversation_id` is omitted, server generates one and returns it in response JSON.
 - For `/chat/stream`, the ID is returned via SSE `meta` event and `X-Conversation-Id` header.
+- For DeepSeek v4 thinking mode, preserve and resend hidden `reasoning_content` from assistant turns.
+- `/chat` includes `assistant_message.reasoning_content`; `/chat/stream` may emit `assistant_meta` SSE with `reasoning_content`.
 
 ## Weather Endpoint (optional)
 
@@ -61,6 +67,7 @@ uv run python agents/get_anime_info.py "进击的巨人"
 - The main orchestrator agent is implemented in `agents/main_agent.py`
 - Main-agent few-shot examples are externalized in `agents/prompts/main_agent_few_shot.txt`
 - Main-agent traces are stored in SQLite at `data/agent_traces.sqlite3` (override via `AGENT_TRACE_DB_PATH`)
+- Centralized model resolver is in `deepseek_defaults.py`
 - Quote source skeleton tool: `agents/get_quote_source.py`
 - Quote source data path: OpenSubtitles API (`/api/v1/subtitles`)
 - Anime tool: `agents/get_anime_info.py` (Jikan `/v4/anime`)

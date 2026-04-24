@@ -9,8 +9,10 @@ from typing import Any, Iterator, cast
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.tools import tool
-from langchain_deepseek import ChatDeepSeek
 from pydantic import BaseModel, Field
+
+from deepseek_compat import ChatDeepSeekCompat
+from deepseek_defaults import resolve_chat_model
 
 load_dotenv()
 
@@ -133,7 +135,7 @@ def get_weather(city: str) -> str:
 	return json.dumps(result, ensure_ascii=False)
 
 
-def build_weather_agent(model_name: str = "deepseek-chat"):
+def build_weather_agent(model_name: str | None = None):
 	system_prompt = (
 		"你是一个天气助手。"
 		"当用户询问天气时，必须优先调用 get_weather 工具后再回答。"
@@ -142,7 +144,11 @@ def build_weather_agent(model_name: str = "deepseek-chat"):
 		"回答保持简洁、中文输出。"
 		"可以略带一点灵动感，让用户读起来更自然，但不要太夸张。"
 	)
-	llm = ChatDeepSeek(model=model_name, temperature=0)
+	llm = ChatDeepSeekCompat(
+		model=resolve_chat_model(model_name),
+		temperature=0,
+		use_responses_api=False,
+	)
 	return create_agent(model=llm, tools=[get_weather], system_prompt=system_prompt)
 
 
@@ -165,14 +171,14 @@ def _extract_text(agent_result: dict[str, Any]) -> str:
 	return str(content)
 
 
-def ask_weather(question: str, model_name: str = "deepseek-chat") -> str:
+def ask_weather(question: str, model_name: str | None = None) -> str:
 	agent = build_weather_agent(model_name=model_name)
 	payload = cast(Any, {"messages": [{"role": "user", "content": question}]})
 	result = agent.invoke(payload)
 	return _extract_text(result)
 
 
-def stream_weather(question: str, model_name: str = "deepseek-chat") -> Iterator[str]:
+def stream_weather(question: str, model_name: str | None = None) -> Iterator[str]:
 	agent = build_weather_agent(model_name=model_name)
 	payload = cast(Any, {"messages": [{"role": "user", "content": question}]})
 	saw_tool_step = False
@@ -204,7 +210,7 @@ def stream_weather(question: str, model_name: str = "deepseek-chat") -> Iterator
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="天气查询 Agent")
 	parser.add_argument("question", help="例如: 北京今天天气怎么样")
-	parser.add_argument("--model", default="deepseek-chat", help="DeepSeek 模型名")
+	parser.add_argument("--model", default=resolve_chat_model(), help="DeepSeek 模型名")
 	args = parser.parse_args()
 	print(ask_weather(args.question, model_name=args.model))
 

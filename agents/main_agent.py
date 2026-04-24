@@ -5,8 +5,9 @@ from typing import Any, Iterator, cast
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_deepseek import ChatDeepSeek
 
+from deepseek_compat import ChatDeepSeekCompat
+from deepseek_defaults import resolve_chat_model
 from agents.trace_logger import finish_run, log_event, start_run
 from agents.tool_registry import get_main_tools
 
@@ -70,12 +71,17 @@ TOOL_STATUS_TEXT = {
 
 @lru_cache(maxsize=4)
 def _build_cached_main_agent(model_name: str):
-    llm = ChatDeepSeek(model=model_name, temperature=0.7)
+    llm = ChatDeepSeekCompat(
+        model=model_name,
+        temperature=0.7,
+        use_responses_api=False,
+        extra_body={"thinking":{"type":"disabled"}}
+    )
     return create_agent(model=llm, tools=get_main_tools(), system_prompt=_build_system_prompt())
 
 
-def build_main_agent(model_name: str = "deepseek-chat"):
-    return _build_cached_main_agent(model_name)
+def build_main_agent(model_name: str | None = None):
+    return _build_cached_main_agent(resolve_chat_model(model_name))
 
 
 def _normalize_content(content: Any) -> str | list[Any]:
@@ -92,9 +98,17 @@ def _to_langchain_message(message: dict[str, Any]) -> BaseMessage:
         return HumanMessage(content=content)
     if role in {"assistant", "ai"}:
         tool_calls = message.get("tool_calls")
+        additional_kwargs: dict[str, Any] = {}
+        reasoning_content = message.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content:
+            additional_kwargs["reasoning_content"] = reasoning_content
         if isinstance(tool_calls, list):
-            return AIMessage(content=content, tool_calls=cast(list[dict[str, Any]], tool_calls))
-        return AIMessage(content=content)
+            return AIMessage(
+                content=content,
+                tool_calls=cast(list[dict[str, Any]], tool_calls),
+                additional_kwargs=additional_kwargs,
+            )
+        return AIMessage(content=content, additional_kwargs=additional_kwargs)
     if role == "system":
         return SystemMessage(content=content)
     if role == "tool":
@@ -137,6 +151,35 @@ def _extract_text(agent_result: dict[str, Any]) -> str:
     return str(content)
 
 
+def _extract_reasoning_content(message: Any) -> str:
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        reasoning = additional_kwargs.get("reasoning_content")
+        if isinstance(reasoning, str):
+            return reasoning
+    return ""
+
+
+def _extract_last_assistant_payload(agent_result: dict[str, Any]) -> dict[str, Any]:
+    messages = agent_result.get("messages") or []
+    if not messages:
+        return {"content": "未获得模型回复", "reasoning_content": ""}
+
+    assistant_message = messages[-1]
+    content = _extract_text({"messages": [assistant_message]})
+    payload: dict[str, Any] = {"content": content}
+
+    reasoning_content = _extract_reasoning_content(assistant_message)
+    if reasoning_content:
+        payload["reasoning_content"] = reasoning_content
+
+    tool_calls = getattr(assistant_message, "tool_calls", None)
+    if isinstance(tool_calls, list) and tool_calls:
+        payload["tool_calls"] = tool_calls
+
+    return payload
+
+
 def _log_tool_events_from_messages(run_id: str, messages: list[Any]) -> int:
     seq = 0
     for message in messages:
@@ -163,14 +206,27 @@ def _log_tool_events_from_messages(run_id: str, messages: list[Any]) -> int:
 
 def ask_main_agent(
     messages: list[dict],
-    model_name: str = "deepseek-chat",
+    model_name: str | None = None,
     conversation_id: str | None = None,
 ) -> str:
-    agent = build_main_agent(model_name=model_name)
+    return ask_main_agent_full(
+        messages=messages,
+        model_name=model_name,
+        conversation_id=conversation_id,
+    )["content"]
+
+
+def ask_main_agent_full(
+    messages: list[dict],
+    model_name: str | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
+    resolved_model_name = resolve_chat_model(model_name)
+    agent = build_main_agent(model_name=resolved_model_name)
     payload = cast(Any, {"messages": _normalize_messages(messages)})
     run_id = start_run(
         mode="ask",
-        model_name=model_name,
+        model_name=resolved_model_name,
         input_messages=messages,
         conversation_id=conversation_id,
     )
@@ -178,9 +234,9 @@ def ask_main_agent(
         result = agent.invoke(payload)
         result_messages = result.get("messages") or []
         _log_tool_events_from_messages(run_id, result_messages)
-        text = _extract_text(result)
-        finish_run(run_id, final_output=text)
-        return text
+        assistant_payload = _extract_last_assistant_payload(result)
+        finish_run(run_id, final_output=str(assistant_payload.get("content", "")))
+        return assistant_payload
     except Exception as exc:
         finish_run(run_id, error=str(exc))
         raise
@@ -188,17 +244,19 @@ def ask_main_agent(
 
 def stream_main_agent(
     messages: list[dict],
-    model_name: str = "deepseek-chat",
+    model_name: str | None = None,
     conversation_id: str | None = None,
-) -> Iterator[dict[str, str]]:
-    agent = build_main_agent(model_name=model_name)
+) -> Iterator[dict[str, Any]]:
+    resolved_model_name = resolve_chat_model(model_name)
+    agent = build_main_agent(model_name=resolved_model_name)
     payload = cast(Any, {"messages": _normalize_messages(messages)})
     last_tool_name = ""
     seq = 0
     output_parts: list[str] = []
+    reasoning_parts: list[str] = []
     run_id = start_run(
         mode="stream",
-        model_name=model_name,
+        model_name=resolved_model_name,
         input_messages=messages,
         conversation_id=conversation_id,
     )
@@ -206,7 +264,6 @@ def stream_main_agent(
         try:
             if not isinstance(event, tuple) or not event:
                 continue
-
             message_chunk = event[0]
             meta = event[1] if len(event) > 1 and isinstance(event[1], dict) else {}
             node = str(meta.get("langgraph_node", ""))
@@ -233,6 +290,10 @@ def stream_main_agent(
             if getattr(message_chunk, "tool_call_chunks", None):
                 continue
 
+            chunk_reasoning = _extract_reasoning_content(message_chunk)
+            if chunk_reasoning:
+                reasoning_parts.append(chunk_reasoning)
+
             content = getattr(message_chunk, "content", "")
             if isinstance(content, str) and content:
                 output_parts.append(content)
@@ -241,5 +302,14 @@ def stream_main_agent(
             finish_run(run_id, final_output="".join(output_parts) or None, error=str(exc))
             raise
 
-    finish_run(run_id, final_output="".join(output_parts))
+    final_output = "".join(output_parts)
+    finish_run(run_id, final_output=final_output)
+
+    final_reasoning = "".join(reasoning_parts)
+    if final_reasoning:
+        yield {
+            "event": "assistant_meta",
+            "type": "assistant_meta",
+            "reasoning_content": final_reasoning,
+        }
 

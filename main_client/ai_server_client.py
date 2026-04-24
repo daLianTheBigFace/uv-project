@@ -4,6 +4,8 @@ from typing import cast, Dict, Iterator, List
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from deepseek_defaults import resolve_chat_model
+
 load_dotenv()
 
 class AIClient:
@@ -12,10 +14,11 @@ class AIClient:
         if not api_key:
             raise ValueError("缺少 DEEPSEEK_API_KEY 配置")
         self.client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        self.model = resolve_chat_model()
 
     def generate_response(self, user_msg: List[Dict[str, str]]) -> str:
         client_response = self.client.chat.completions.create(  # type: ignore[arg-type]
-            model="deepseek-chat",
+            model=self.model,
             messages=user_msg,
             stream=False,
         )
@@ -25,7 +28,7 @@ class AIClient:
 class StreamAIClient(AIClient):
     def generate_response(self, user_msg: List[Dict[str, str]]) -> Iterator[str]:
         client_response = self.client.chat.completions.create(  # type: ignore[arg-type]
-            model="deepseek-chat",
+            model=self.model,
             messages=user_msg,
             stream=True,
             # temperature=1.0,

@@ -4,6 +4,8 @@ from typing import Any, Iterator
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from deepseek_defaults import resolve_vision_model
+
 load_dotenv()
 
 
@@ -15,7 +17,7 @@ class AIVisionClient:
         if not api_key:
             raise ValueError("缺少 DEEPSEEK_API_KEY 配置")
         self.client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
-        self.model = os.getenv("DEEPSEEK_VISION_MODEL", "deepseek-chat").strip() or "deepseek-chat"
+        self.model = resolve_vision_model()
         timeout_raw = os.getenv("DEEPSEEK_VISION_TIMEOUT_SEC", "35").strip()
         try:
             self.timeout_sec = max(5.0, float(timeout_raw))

@@ -5,7 +5,7 @@ from pydantic import BaseModel
 import json
 import uuid
 from typing import Any, Iterator, Literal
-from agents.main_agent import ask_main_agent, stream_main_agent
+from agents.main_agent import ask_main_agent, ask_main_agent_full, stream_main_agent
 from main_client.ai_server_client import StreamAIClient
 from main_client.ai_vision_client import AIVisionClient
 
@@ -19,12 +19,26 @@ def _content_to_text(content: str | list[Any]) -> str:
         return content
 
     parts: list[str] = []
+    saw_image = False
     for item in content:
-        if isinstance(item, dict) and "text" in item:
-            parts.append(str(item["text"]))
-        else:
-            parts.append(str(item))
-    return "".join(parts)
+        if isinstance(item, dict):
+            part_type = str(item.get("type", "")).strip().lower()
+            if part_type in {"image_url", "input_image", "image"} or "image_url" in item:
+                saw_image = True
+                continue
+            if "text" in item and item["text"] is not None:
+                parts.append(str(item["text"]))
+                continue
+        elif isinstance(item, str):
+            parts.append(item)
+            continue
+
+    text = "".join(parts).strip()
+    if text and saw_image:
+        return f"{text}\n（用户附带了一张图片）"
+    if saw_image:
+        return "（用户发送了一张图片）"
+    return text
 
 
 def _normalize_messages(messages: list["ChatMessage"]) -> list[dict[str, str]]:
@@ -51,6 +65,31 @@ def _serialize_messages(messages: list["ChatMessage"]) -> list[dict[str, Any]]:
             item["tool_call_id"] = message.tool_call_id
         if message.tool_calls is not None:
             item["tool_calls"] = message.tool_calls
+        if isinstance(message.reasoning_content, str) and message.reasoning_content:
+            item["reasoning_content"] = message.reasoning_content
+        serialized.append(item)
+    return serialized
+
+
+def _serialize_messages_for_agent(messages: list["ChatMessage"]) -> list[dict[str, Any]]:
+    """Serialize messages for text-only agent calls.
+
+    Any historical multimodal content is flattened into safe text so that the
+    text model never receives raw `image_url` blocks on follow-up turns.
+    """
+
+    serialized: list[dict[str, Any]] = []
+    for message in messages:
+        item: dict[str, Any] = {
+            "role": message.role,
+            "content": _content_to_text(message.content),
+        }
+        if message.tool_call_id:
+            item["tool_call_id"] = message.tool_call_id
+        if message.tool_calls is not None:
+            item["tool_calls"] = message.tool_calls
+        if isinstance(message.reasoning_content, str) and message.reasoning_content:
+            item["reasoning_content"] = message.reasoning_content
         serialized.append(item)
     return serialized
 
@@ -138,6 +177,7 @@ class ChatMessage(BaseModel):
     content: str | list[Any] = ""
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None
 
 
 class WeatherRequest(BaseModel):
@@ -148,8 +188,21 @@ class WeatherRequest(BaseModel):
 @app.post("/chat")
 async def chat(request: ChatRequest):
     conversation_id = _resolve_conversation_id(request.conversation_id)
-    response = ask_main_agent(_serialize_messages(request.messages), conversation_id=conversation_id)
-    return {"conversation_id": conversation_id, "response": response}
+    assistant_payload = ask_main_agent_full(
+        _serialize_messages_for_agent(request.messages),
+        conversation_id=conversation_id,
+    )
+    response = str(assistant_payload.get("content", ""))
+    return {
+        "conversation_id": conversation_id,
+        "response": response,
+        "assistant_message": {
+            "role": "assistant",
+            "content": response,
+            "tool_calls": assistant_payload.get("tool_calls"),
+            "reasoning_content": assistant_payload.get("reasoning_content"),
+        },
+    }
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
@@ -177,7 +230,7 @@ async def chat_stream(request: ChatRequest):
             yield f"event: meta\ndata: {meta_payload}\n\n"
 
             for event in stream_main_agent(
-                _serialize_messages(request.messages), conversation_id=conversation_id
+                _serialize_messages_for_agent(request.messages), conversation_id=conversation_id
             ):
                 event_name = str(event.get("event", "token"))
                 payload = json.dumps(event, ensure_ascii=False)
